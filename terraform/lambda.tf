@@ -27,6 +27,6 @@ resource "aws_lambda_permission" "allow_s3_invoke" {
 
 data "archive_file" "lambda_zip" {
     type        = "zip"
-    source_file = "${path.module}/../lambda/process_csv.py"
-    output_path = "${path.module}/../lambda/process_csv.zip"
+    source_file = var.source_file
+    output_path = var.output_path
 }

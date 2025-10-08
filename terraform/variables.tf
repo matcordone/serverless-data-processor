@@ -37,3 +37,13 @@ variable "version" {
   description = "Version of the AWS provider"
   type        = string
 }
+
+variable "source_file" {
+  description = "Path to the Lambda function source file"
+  type        = string
+}
+
+variable "output_path" {
+  description = "Path to output the zipped Lambda function"
+  type        = string
+}
