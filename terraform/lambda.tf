@@ -1,8 +1,8 @@
 resource "aws_lambda_function" "process_csv" {
-    function_name = "process_csv_lambda"
+    function_name = var.function_name
     role = aws_iam_role.lambda_execution_role.arn
-    handler = "process_csv.lambda_handler"
-    runtime = "python3.13"
+    handler = var.handler
+    runtime = var.runtime
     filename = data.archive_file.lambda_zip.output_path
     source_code_hash = data.archive_file.lambda_zip.output_base64sha256
     timeout = 30
@@ -17,7 +17,7 @@ resource "aws_lambda_function" "process_csv" {
 }
 
 resource "aws_lambda_permission" "allow_s3_invoke" {
-    statement_id = "AllowS3Invoke"
+    statement_id = var.statement_id
     action = "lambda:invokeFunction"
     function_name = aws_lambda_function.process_csv.function_name
     principal = "s3.amazonaws.com"
