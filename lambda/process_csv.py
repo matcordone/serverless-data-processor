@@ -1,10 +1,11 @@
+import csv
 import io
 import logging
 import os
 from pathlib import Path
+from typing import Iterable, Optional
 
 import boto3
-import pandas as pd
 
 
 logger = logging.getLogger()
@@ -15,7 +16,8 @@ def lambda_handler(event, context):
     """
     Lambda entry point triggered by an S3 `ObjectCreated` event.
     It downloads the CSV uploaded to the input bucket, filters rows where the salary
-    column is greater than 1000, and writes the filtered dataset to the output bucket.
+    column is greater than 1000, and writes a minimal CSV with name + salary to the
+    output bucket.
     """
     s3 = boto3.client("s3")
 
@@ -28,44 +30,53 @@ def lambda_handler(event, context):
 
     try:
         response = s3.get_object(Bucket=source_bucket, Key=source_key)
-        csv_body = response["Body"].read()
+        csv_body = response["Body"].read().decode("utf-8")
     except Exception as exc:
         logger.exception("Failed to download object %s from bucket %s", source_key, source_bucket)
         raise exc
 
-    df = pd.read_csv(io.BytesIO(csv_body))
+    rows = list(csv.DictReader(io.StringIO(csv_body)))
+    if not rows:
+        logger.warning("Uploaded CSV is empty; nothing to process.")
+        return {"status": "empty_csv"}
 
-    salary_column = _detect_salary_column(df)
+    salary_column = _detect_column(rows[0].keys(), {"salary", "salario", "income", "sueldos", "wage"})
     if salary_column is None:
         message = "The uploaded CSV does not contain a salary column."
         logger.error(message)
         raise ValueError(message)
 
-    filtered_df = df[df[salary_column] > 1000]
-    logger.info("Filtered dataset contains %d rows out of %d", len(filtered_df), len(df))
+    name_column = _detect_column(rows[0].keys(), {"name", "nombre", "employee", "persona"})
 
-    name_column = _detect_name_column(df)
-    if name_column:
-        result_df = filtered_df[[name_column, salary_column]].copy()
-    else:
-        result_df = filtered_df[[salary_column]].copy()
-        logger.warning(
-            "Name column not found; output CSV will include only the salary column."
-        )
+    filtered_rows = []
+    for row in rows:
+        salary_value = _parse_salary(row.get(salary_column))
+        if salary_value is not None and salary_value > 1000:
+            entry = {"salary": salary_value}
+            if name_column:
+                entry["name"] = row.get(name_column, "").strip()
+            filtered_rows.append(entry)
 
-    result_df.rename(columns={salary_column: "salary"}, inplace=True)
-    if name_column:
-        result_df.rename(columns={name_column: "name"}, inplace=True)
+    logger.info("Filtered dataset contains %d rows out of %d", len(filtered_rows), len(rows))
+
+    if not filtered_rows:
+        logger.info("No rows matched the salary criteria; skipping upload.")
+        return {"status": "no_results"}
 
     target_key = _build_output_key(source_key)
-    csv_buffer = io.StringIO()
-    result_df.to_csv(csv_buffer, index=False)
+    output_buffer = io.StringIO()
+
+    fieldnames = ["name", "salary"] if name_column else ["salary"]
+    writer = csv.DictWriter(output_buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in filtered_rows:
+        writer.writerow(row)
 
     try:
         s3.put_object(
             Bucket=output_bucket,
             Key=target_key,
-            Body=csv_buffer.getvalue().encode("utf-8"),
+            Body=output_buffer.getvalue().encode("utf-8"),
             ContentType="text/csv",
         )
     except Exception as exc:
@@ -73,24 +84,29 @@ def lambda_handler(event, context):
         raise exc
 
     logger.info("Filtered CSV successfully stored at s3://%s/%s", output_bucket, target_key)
+    return {"status": "success", "output_key": target_key}
 
 
-def _detect_salary_column(df: pd.DataFrame) -> str | None:
-    """Return the column name representing salary (case-insensitive) or None if not found."""
-    known_labels = {"salary", "salario", "income", "sueldos", "wage"}
-    for column in df.columns:
-        if column.strip().lower() in known_labels:
+def _detect_column(columns: Iterable[str], known_labels: set[str]) -> Optional[str]:
+    """Return the first column name matching any of the expected labels."""
+    for column in columns:
+        if column and column.strip().lower() in known_labels:
             return column
     return None
 
 
-def _detect_name_column(df: pd.DataFrame) -> str | None:
-    """Return the column name representing person's name (case-insensitive) or None if not found."""
-    known_labels = {"name", "nombre", "employee", "persona"}
-    for column in df.columns:
-        if column.strip().lower() in known_labels:
-            return column
-    return None
+def _parse_salary(raw_value: Optional[str]) -> Optional[float]:
+    """Convert the salary column to float, handling thousands separators and blank cells."""
+    if raw_value is None:
+        return None
+    cleaned = raw_value.strip().replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        logger.warning("Unable to parse salary value '%s'; skipping row.", raw_value)
+        return None
 
 
 def _build_output_key(source_key: str) -> str:
